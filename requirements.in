@@ -1,0 +1,11 @@
+anchorpy
+aiofiles
+base58
+discord
+python-dotenv
+solana
+solders
+matplotlib
+pandas
+aiosqlite
+aiologger
