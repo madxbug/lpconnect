@@ -163,19 +163,6 @@ class GooseBot(commands.Bot):
             else:
                 await ctx.send("Wallet not found in the monitoring list.")
 
-        @self.command(name='vote')
-        async def vote(ctx, wallet: str):
-            """
-            Vote for a wallet sub-group.
-            Usage: !vote <wallet_address>
-            """
-            if wallet in self.wallets:
-                channel = self.wallets[wallet]
-                await channel.send(f"{ctx.author.mention} voted for this wallet!")
-                # You can implement more sophisticated voting logic here
-            else:
-                await ctx.send("Invalid wallet address. Please choose from the registered wallets.")
-
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''CREATE TABLE IF NOT EXISTS wallets
