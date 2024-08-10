@@ -23,7 +23,7 @@ from utils.storage import PositionStorage
 load_dotenv()
 
 solana_client = AsyncClient(os.getenv('SOLANA_RPC'))
-NOTIFICATION_CATEGORY_ID = int(os.getenv('NOTIFICATION_CATEGORY_ID'))
+NOTIFICATION_CHANNEL_ID = int(os.getenv('NOTIFICATION_CHANNEL_ID'))  # Change this to channel ID
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 COMMAND_PREFIX = os.getenv('COMMAND_PREFIX')
 POSITIONS_CACHE_JSON = f'{FILE_DIR}/storage/positions.json'
@@ -59,22 +59,24 @@ def setup_logger():
 logger = setup_logger()
 
 
-async def create_wallet_channel(guild, wallet_address, alias):
-    category = guild.get_channel(NOTIFICATION_CATEGORY_ID)
-    if not category:
-        category = await guild.create_category("Wallet Notifications")
-
-    channel_name = f"{wallet_address[:4]}_{wallet_address[-4:]}"
+async def create_wallet_thread(channel, wallet_address, alias):
+    thread_name = f"{wallet_address[:4]}_{wallet_address[-4:]}"
     if alias:
-        channel_name = f"{alias}-{channel_name}"
-    channel = await guild.create_text_channel(channel_name, category=category)
-    return channel
+        thread_name = f"{alias}-{thread_name}"
+    thread = await channel.create_thread(
+        name=thread_name,
+        type=discord.ChannelType.public_thread,
+        auto_archive_duration=10080,  # 7 days
+        reason="Wallet monitoring thread"
+    )
+    await thread.send(f"Monitoring started for wallet {wallet_address}")
+    return thread
 
 
 class GooseBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix=COMMAND_PREFIX, intents=intents)
-        self.wallets = {}  # Changed to a dict to store wallet: (channel, alias) pairs
+        self.wallets = {}  # Store wallet: (thread, alias) pairs
         self.position_storage = PositionStorage(POSITIONS_CACHE_JSON)
         self.db_path = DB_PATH
         self.add_commands()
@@ -83,16 +85,21 @@ class GooseBot(commands.Bot):
         @self.command(name='add', aliases=['a'])
         async def add_wallet(ctx, wallet: str, alias: str = None):
             """
-            Add a wallet to the monitoring list and create a sub-channel for it.
-            Usage: !add <wallet_address> or !a <wallet_address>
+            Add a wallet to the monitoring list and create a public thread for it.
+            Usage: !add <wallet_address> [alias] or !a <wallet_address> [alias]
             """
             if wallet:
-                channel = await create_wallet_channel(ctx.guild, wallet, alias)
-                await self.save_wallet(wallet, channel.id, alias)
-                self.wallets[wallet] = (channel, alias)
-                logger.info(f"Wallet {wallet} added to monitoring list with channel {channel.name} and alias {alias}.")
+                channel = self.get_channel(NOTIFICATION_CHANNEL_ID)
+                if not channel:
+                    await ctx.send("Notification channel not found. Please check the bot configuration.")
+                    return
+                thread = await create_wallet_thread(channel, wallet, alias)
+                await self.save_wallet(wallet, thread.id, alias)
+                self.wallets[wallet] = (thread, alias)
+                logger.info(
+                    f"Wallet {wallet} added to monitoring list with public thread {thread.name} and alias {alias}.")
                 await ctx.send(
-                    f"Wallet {wallet} added to monitoring list with alias {alias}. Channel created: {channel.mention}")
+                    f"Wallet {wallet} added to monitoring list with alias {alias}. Public thread created: {thread.mention}")
             else:
                 await ctx.send("Please provide a valid public key to add.")
 
@@ -103,11 +110,11 @@ class GooseBot(commands.Bot):
             Usage: !alias <wallet_address> <new_alias> or !al <wallet_address> <new_alias>
             """
             if wallet in self.wallets:
-                channel, old_alias = self.wallets[wallet]
+                thread, old_alias = self.wallets[wallet]
                 await self.update_wallet_alias(wallet, new_alias)
-                self.wallets[wallet] = (channel, new_alias)
-                new_channel_name = f"{new_alias}-{wallet[:4]}_{wallet[-4:]}"
-                await channel.edit(name=new_channel_name)
+                self.wallets[wallet] = (thread, new_alias)
+                new_thread_name = f"{new_alias}-{wallet[:4]}_{wallet[-4:]}"
+                await thread.edit(name=new_thread_name)
                 logger.info(f"Alias updated for wallet {wallet} from {old_alias} to {new_alias}.")
                 await ctx.send(f"Alias updated for wallet {wallet} from {old_alias} to {new_alias}.")
             else:
@@ -116,17 +123,17 @@ class GooseBot(commands.Bot):
         @self.command(name='remove', aliases=['r'])
         async def remove_wallet(ctx, wallet: str):
             """
-            Remove a wallet from the monitoring list and delete its sub-channel.
+            Remove a wallet from the monitoring list and mark its thread as inactive.
             Usage: !remove <wallet_address> or !r <wallet_address>
             """
             if wallet in self.wallets:
-                channel, alias = self.wallets[wallet]
-                await channel.delete()
+                thread, alias = self.wallets[wallet]
+                await thread.edit(archived=True, locked=True)
                 await self.remove_wallet(wallet)
                 del self.wallets[wallet]
-                logger.info(f"Wallet {wallet} (alias: {alias}) removed from monitoring list and channel deleted.")
+                logger.info(f"Wallet {wallet} (alias: {alias}) removed from monitoring list and thread archived.")
                 await ctx.send(
-                    f"Wallet {wallet} (alias: {alias}) removed from monitoring list and its channel deleted.")
+                    f"Wallet {wallet} (alias: {alias}) removed from monitoring list and its thread archived.")
             else:
                 await ctx.send("Wallet not found in the monitoring list.")
 
@@ -172,26 +179,31 @@ class GooseBot(commands.Bot):
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''CREATE TABLE IF NOT EXISTS wallets
-                                (address TEXT PRIMARY KEY, channel_id INTEGER, alias TEXT)''')
+                                (address TEXT PRIMARY KEY, thread_id INTEGER, alias TEXT)''')
             await db.commit()
         logger.info("Database initialized.")
 
     async def load_wallets(self):
+        channel = self.get_channel(NOTIFICATION_CHANNEL_ID)
+        if not channel:
+            logger.error("Notification channel not found. Please check the bot configuration.")
+            return
+
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute('SELECT address, channel_id, alias FROM wallets') as cursor:
+            async with db.execute('SELECT address, thread_id, alias FROM wallets') as cursor:
                 rows = await cursor.fetchall()
                 for row in rows:
-                    channel = self.get_channel(row[1])
-                    if channel:
-                        self.wallets[row[0]] = (channel, row[2])
+                    thread = channel.get_thread(row[1])
+                    if thread:
+                        self.wallets[row[0]] = (thread, row[2])
         logger.info(f"Loaded {len(self.wallets)} wallets from database.")
 
-    async def save_wallet(self, wallet, channel_id, alias):
+    async def save_wallet(self, wallet, thread_id, alias):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('INSERT OR REPLACE INTO wallets (address, channel_id, alias) VALUES (?, ?, ?)',
-                             (wallet, channel_id, alias))
+            await db.execute('INSERT OR REPLACE INTO wallets (address, thread_id, alias) VALUES (?, ?, ?)',
+                             (wallet, thread_id, alias))
             await db.commit()
-        logger.info(f"Wallet {wallet} saved to database with channel ID {channel_id} and alias {alias}.")
+        logger.info(f"Wallet {wallet} saved to database with thread ID {thread_id} and alias {alias}.")
 
     async def update_wallet_alias(self, wallet, new_alias):
         async with aiosqlite.connect(self.db_path) as db:
@@ -215,9 +227,9 @@ class GooseBot(commands.Bot):
 
     @tasks.loop(minutes=1)
     async def check_wallets(self):
-        for wallet, (channel, alias) in self.wallets.items():
+        for wallet, (thread, alias) in self.wallets.items():
             try:
-                await self.fetch_and_send_positions(channel, wallet)
+                await self.fetch_and_send_positions(thread, wallet)
             except Exception as e:
                 logger.error(f"Failed to check wallet {wallet} (alias: {alias}): {str(e)}", exc_info=True)
 
