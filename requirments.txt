@@ -1,0 +1,12 @@
+aiofiles
+msgpack
+httpx
+requests
+anchorpy
+base58
+aiohttp
+discord
+python-dotenv
+numpy
+pandas
+matplotlib
