@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 LP Bot Manager
 
@@ -21,6 +20,9 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Any
+
+FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.dirname(FILE_DIR))
 
 from bots.base.bot_config import BotConfig
 from bots.lparena.lparena import LPArenaBot
